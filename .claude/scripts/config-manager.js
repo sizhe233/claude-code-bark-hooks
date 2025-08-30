@@ -2,9 +2,34 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
-// 配置文件路径
-const configPath = path.join(__dirname, '..', 'config', '.env');
+// 查找配置文件路径（支持全局/项目配置）
+function findConfigPath() {
+  const configPaths = [
+    // 1. 项目级配置（相对于脚本位置）
+    path.join(__dirname, '..', 'config', '.env'),
+    // 2. 项目级配置（相对于当前工作目录）
+    path.join(process.cwd(), '.claude', 'config', '.env'),
+    // 3. 全局配置（用户主目录）
+    path.join(os.homedir(), '.claude', 'config', '.env')
+  ];
+  
+  for (const configPath of configPaths) {
+    if (fs.existsSync(configPath)) {
+      return {
+        path: configPath,
+        type: configPath.includes(os.homedir()) ? 'global' : 'project'
+      };
+    }
+  }
+  
+  // 如果找不到配置文件，返回项目级配置路径用于创建
+  return {
+    path: configPaths[0],
+    type: 'project'
+  };
+}
 
 // Hook事件配置映射
 const HOOK_CONFIGS = {
@@ -19,9 +44,10 @@ const HOOK_CONFIGS = {
 // 读取配置文件
 function loadConfig() {
   const config = {};
+  const configInfo = findConfigPath();
   
   try {
-    const content = fs.readFileSync(configPath, 'utf8');
+    const content = fs.readFileSync(configInfo.path, 'utf8');
     content.split('\n').forEach(line => {
       line = line.trim();
       if (line && !line.startsWith('#')) {
@@ -31,8 +57,13 @@ function loadConfig() {
         }
       }
     });
+    
+    // 添加配置源信息
+    config._CONFIG_PATH = configInfo.path;
+    config._CONFIG_TYPE = configInfo.type;
   } catch (error) {
     console.error('❌ 读取配置文件失败:', error.message);
+    console.error('   配置文件路径:', configInfo.path);
     process.exit(1);
   }
   
@@ -41,8 +72,10 @@ function loadConfig() {
 
 // 更新配置文件
 function updateConfig(updates) {
+  const configInfo = findConfigPath();
+  
   try {
-    let content = fs.readFileSync(configPath, 'utf8');
+    let content = fs.readFileSync(configInfo.path, 'utf8');
     
     // 更新每个配置项
     for (const [key, value] of Object.entries(updates)) {
@@ -55,7 +88,7 @@ function updateConfig(updates) {
       }
     }
     
-    fs.writeFileSync(configPath, content, 'utf8');
+    fs.writeFileSync(configInfo.path, content, 'utf8');
     return true;
   } catch (error) {
     console.error('❌ 更新配置文件失败:', error.message);
@@ -68,6 +101,10 @@ function showStatus() {
   console.log('📋 Claude Code Bark Hooks 配置状态\n');
   
   const config = loadConfig();
+  
+  // 显示配置源信息
+  const configType = config._CONFIG_TYPE === 'global' ? '🌍 全局配置' : '📁 项目配置';
+  console.log(`${configType} (${config._CONFIG_PATH})\n`);
   
   Object.entries(HOOK_CONFIGS).forEach(([id, info]) => {
     const value = config[info.key] || info.default;

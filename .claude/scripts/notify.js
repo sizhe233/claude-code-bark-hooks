@@ -5,26 +5,50 @@ const path = require('path');
 const os = require('os');
 const { exec } = require('child_process');
 
-// 读取.env环境变量文件
+// 读取.env环境变量文件（支持全局/项目配置）
 function loadEnvFile() {
-  const envPath = path.join(__dirname, '..', 'config', '.env');
   const env = {};
   
-  try {
-    if (fs.existsSync(envPath)) {
-      const content = fs.readFileSync(envPath, 'utf8');
-      content.split('\n').forEach(line => {
-        line = line.trim();
-        if (line && !line.startsWith('#') && line.includes('=')) {
-          const [key, ...valueParts] = line.split('=');
-          if (key && valueParts.length > 0) {
-            env[key.trim()] = valueParts.join('=').trim();
+  // 定义配置文件搜索路径（优先级从高到低）
+  const configPaths = [
+    // 1. 项目级配置（相对于脚本位置）
+    path.join(__dirname, '..', 'config', '.env'),
+    // 2. 项目级配置（相对于当前工作目录）
+    path.join(process.cwd(), '.claude', 'config', '.env'),
+    // 3. 全局配置（用户主目录）
+    path.join(os.homedir(), '.claude', 'config', '.env')
+  ];
+  
+  let configSource = '';
+  
+  // 按优先级查找配置文件
+  for (const envPath of configPaths) {
+    try {
+      if (fs.existsSync(envPath)) {
+        const content = fs.readFileSync(envPath, 'utf8');
+        content.split('\n').forEach(line => {
+          line = line.trim();
+          if (line && !line.startsWith('#') && line.includes('=')) {
+            const [key, ...valueParts] = line.split('=');
+            if (key && valueParts.length > 0) {
+              env[key.trim()] = valueParts.join('=').trim();
+            }
           }
-        }
-      });
+        });
+        configSource = envPath;
+        break; // 找到配置文件后停止搜索
+      }
+    } catch (error) {
+      // 配置文件读取失败时继续尝试下一个
+      continue;
     }
-  } catch (error) {
-    // .env文件读取失败时静默忽略
+  }
+  
+  // 添加配置源信息用于调试
+  if (configSource) {
+    const isGlobal = configSource.includes(os.homedir());
+    env._CONFIG_SOURCE = configSource;
+    env._CONFIG_TYPE = isGlobal ? 'global' : 'project';
   }
   
   return env;
@@ -168,6 +192,9 @@ async function main() {
   
   const config = loadConfig();
   log(`Config loaded: BARK_KEY=${config.BARK_KEY.substring(0, 5)}..., API=${config.BARK_API}`);
+  if (config._CONFIG_SOURCE) {
+    log(`Config source: ${config._CONFIG_TYPE} (${config._CONFIG_SOURCE})`);
+  }
   
   const jsonData = await readStdin();
   log(`JSON data received: ${JSON.stringify(jsonData, null, 2)}`);
