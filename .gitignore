@@ -1,0 +1,10 @@
+# 调试日志文件
+notify-debug.log
+
+# 环境变量文件（包含敏感信息）
+.claude/config/.env
+
+# 临时测试文件
+test-*.txt
+test-*.json
+.claude\settings.local.json
