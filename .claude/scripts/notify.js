@@ -5,6 +5,13 @@ const path = require('path');
 const os = require('os');
 const { exec } = require('child_process');
 
+// 全局日志函数
+const logFile = path.join(__dirname, '..', '..', 'notify-debug.log');
+function log(msg) {
+  const timestamp = new Date().toISOString();
+  fs.appendFileSync(logFile, `${timestamp} - ${msg}\n`, 'utf8');
+}
+
 // 读取.env环境变量文件（支持全局/项目配置）
 function loadEnvFile() {
   const env = {};
@@ -59,12 +66,18 @@ function loadConfig() {
   // 从.env文件加载所有配置
   const config = loadEnvFile();
   
-  // 设置默认值（如果.env中没有配置）
+  // Bark配置默认值
+  config.BARK_ENABLED = config.BARK_ENABLED || 'true';
   config.BARK_KEY = config.BARK_KEY || 'YOUR_BARK_KEY';
   config.BARK_API = config.BARK_API || 'https://api.day.app';
   config.BARK_GROUP = config.BARK_GROUP || 'Claude-Code';
   config.BARK_SOUND = config.BARK_SOUND || 'default';
   config.BARK_LEVEL = config.BARK_LEVEL || 'active';
+  
+  // 钉钉配置默认值
+  config.DINGTALK_ENABLED = config.DINGTALK_ENABLED || 'false';
+  config.DINGTALK_WEBHOOK = config.DINGTALK_WEBHOOK || '';
+  config.DINGTALK_SECRET = config.DINGTALK_SECRET || '';
   
   return config;
 }
@@ -120,37 +133,140 @@ function urlEncode(str) {
   });
 }
 
-// 发送通知
-function sendNotification(config, title, subtitle, body, options = {}) {
-  const encodedTitle = urlEncode(title);
-  const encodedSubtitle = urlEncode(subtitle);
-  const encodedBody = urlEncode(body);
-  
-  let url = `${config.BARK_API}/${config.BARK_KEY}/${encodedTitle}`;
-  if (subtitle) url += `/${encodedSubtitle}`;
-  if (body) url += `/${encodedBody}`;
-  
-  const params = new URLSearchParams();
-  params.set('group', config.BARK_GROUP);
-  
-  // 使用配置文件或传入的选项
-  const sound = options.sound || config.BARK_SOUND;
-  const level = options.level || config.BARK_LEVEL;
-  
-  if (sound && sound !== 'default') params.set('sound', sound);
-  if (level && level !== 'active') params.set('level', level);
-  
-  url += `?${params.toString()}`;
-  
-  // 使用curl发送请求
-  const curlCmd = process.platform === 'win32' ? 'curl.exe' : 'curl';
-  exec(`${curlCmd} -s "${url}"`, (error, stdout, stderr) => {
-    if (error) {
-      console.error('Notification failed:', error.message);
-    } else {
-      console.log('Notification sent successfully');
+// 发送钉钉机器人通知
+function sendDingTalkNotification(config, title, subtitle, body) {
+  return new Promise((resolve, reject) => {
+    // 构建钉钉消息内容
+    const content = [
+      `**${title}**`,
+      subtitle ? `**项目**: ${subtitle.replace('Project:', '')}` : '',
+      '',
+      body || '无详细信息'
+    ].filter(Boolean).join('\n');
+
+    // 钉钉API请求体
+    const payload = {
+      msgtype: 'markdown',
+      markdown: {
+        title: title,
+        text: content
+      }
+    };
+
+    let webhookUrl = config.DINGTALK_WEBHOOK;
+    
+    // 如果配置了加签密钥，需要生成签名
+    if (config.DINGTALK_SECRET) {
+      const crypto = require('crypto');
+      const timestamp = Date.now();
+      const stringToSign = `${timestamp}\n${config.DINGTALK_SECRET}`;
+      const sign = crypto.createHmac('sha256', config.DINGTALK_SECRET).update(stringToSign).digest('base64');
+      webhookUrl += `&timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`;
     }
+
+    // 构建curl命令，使用双引号和转义
+    const jsonStr = JSON.stringify(payload).replace(/"/g, '\\"');
+    const curlCmd = `curl -X POST "${webhookUrl}" ` +
+      `-H "Content-Type: application/json" ` +
+      `-d "${jsonStr}"`;
+
+    log(`Sending DingTalk notification: ${title}`);
+    
+    exec(curlCmd, (error, stdout, stderr) => {
+      if (error) {
+        log(`DingTalk notification failed: ${error.message}`);
+        reject(error);
+        return;
+      }
+      
+      try {
+        const response = JSON.parse(stdout);
+        if (response.errcode === 0) {
+          log('DingTalk notification sent successfully');
+          resolve();
+        } else {
+          log(`DingTalk API error: ${response.errmsg}`);
+          reject(new Error(response.errmsg));
+        }
+      } catch (parseError) {
+        log(`DingTalk response parse error: ${parseError.message}`);
+        reject(parseError);
+      }
+    });
   });
+}
+
+// 发送Bark通知
+function sendBarkNotification(config, title, subtitle, body, options = {}) {
+  return new Promise((resolve, reject) => {
+    const encodedTitle = urlEncode(title);
+    const encodedSubtitle = urlEncode(subtitle);
+    const encodedBody = urlEncode(body);
+    
+    let url = `${config.BARK_API}/${config.BARK_KEY}/${encodedTitle}`;
+    if (subtitle) url += `/${encodedSubtitle}`;
+    if (body) url += `/${encodedBody}`;
+    
+    const params = new URLSearchParams();
+    params.set('group', config.BARK_GROUP);
+    
+    // 使用配置文件或传入的选项
+    const sound = options.sound || config.BARK_SOUND;
+    const level = options.level || config.BARK_LEVEL;
+    
+    if (sound && sound !== 'default') params.set('sound', sound);
+    if (level && level !== 'active') params.set('level', level);
+    
+    url += `?${params.toString()}`;
+
+    log(`Sending Bark notification: ${title}`);
+    
+    // 使用curl发送请求
+    const curlCmd = process.platform === 'win32' ? 'curl.exe' : 'curl';
+    exec(`${curlCmd} -s "${url}"`, (error, stdout, stderr) => {
+      if (error) {
+        log(`Bark notification failed: ${error.message}`);
+        reject(error);
+      } else {
+        log('Bark notification sent successfully');
+        resolve();
+      }
+    });
+  });
+}
+
+// 统一发送通知函数
+async function sendNotification(config, title, subtitle, body, options = {}) {
+  const results = [];
+  
+  // 发送Bark通知
+  if (config.BARK_ENABLED === 'true' && config.BARK_KEY && config.BARK_KEY !== 'YOUR_BARK_KEY') {
+    try {
+      await sendBarkNotification(config, title, subtitle, body, options);
+      results.push('Bark: success');
+    } catch (error) {
+      results.push(`Bark: failed - ${error.message}`);
+    }
+  }
+  
+  // 发送钉钉通知
+  if (config.DINGTALK_ENABLED === 'true' && config.DINGTALK_WEBHOOK) {
+    try {
+      await sendDingTalkNotification(config, title, subtitle, body);
+      results.push('DingTalk: success');
+    } catch (error) {
+      results.push(`DingTalk: failed - ${error.message}`);
+    }
+  }
+  
+  // 返回结果
+  if (results.length > 0) {
+    console.log('Notification results:', results.join(', '));
+  } else {
+    console.log('No notification channels enabled');
+  }
+  
+  return results;
 }
 
 // 检查事件是否启用
@@ -181,13 +297,6 @@ function isHookEnabled(config, eventType) {
 
 // 主函数
 async function main() {
-  // 添加调试日志
-  const logFile = path.join(__dirname, '..', '..', 'notify-debug.log');
-  const log = (msg) => {
-    const timestamp = new Date().toISOString();
-    fs.appendFileSync(logFile, `${timestamp} - ${msg}\n`, 'utf8');
-  };
-  
   log(`Script started with args: ${process.argv.slice(2).join(', ')}`);
   
   const config = loadConfig();
@@ -280,7 +389,7 @@ async function main() {
   
   // 发送通知
   log(`Sending notification: ${title} / ${subtitle} / ${body}`);
-  sendNotification(config, title, subtitle, body, options);
+  await sendNotification(config, title, subtitle, body, options);
   log('Notification function called');
 }
 
