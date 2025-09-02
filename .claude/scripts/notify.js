@@ -133,23 +133,130 @@ function urlEncode(str) {
   });
 }
 
-// 发送钉钉机器人通知
-function sendDingTalkNotification(config, title, subtitle, body) {
+// 发送钉钉机器人通知（支持更长消息和丰富Markdown格式）
+function sendDingTalkNotification(config, title, subtitle, body, jsonData = {}) {
   return new Promise((resolve, reject) => {
-    // 构建钉钉消息内容
-    const content = [
-      `**${title}**`,
-      subtitle ? `**项目**: ${subtitle.replace('Project:', '')}` : '',
+    // 构建丰富的钉钉Markdown消息
+    const projectName = subtitle ? subtitle.replace('Project:', '') : '';
+    const timestamp = new Date().toLocaleString('zh-CN');
+    
+    let content = [
+      `# 🤖 ${title}`,
       '',
-      body || '无详细信息'
-    ].filter(Boolean).join('\n');
+      `**⏰ 时间**: ${timestamp}`,
+      `**📁 项目**: ${projectName}`,
+      '',
+      '---',
+      ''
+    ];
+
+    // 根据不同事件类型添加详细信息
+    const eventType = title.split('-').pop();
+    
+    if (body) {
+      if (eventType === 'Stop') {
+        content.push('## ✅ 任务完成');
+        content.push('');
+        content.push(`> ${body}`);
+        
+        // 添加会话统计信息
+        if (jsonData.session_id) {
+          content.push('');
+          content.push('**📊 会话信息**:');
+          content.push(`- Session ID: \`${jsonData.session_id.substring(0, 8)}...\``);
+        }
+      } else if (eventType.includes('Tool')) {
+        content.push('## 🔧 工具操作');
+        content.push('');
+        content.push(`**操作详情**: ${body}`);
+        
+        // 添加工具详细信息
+        if (jsonData.tool_input) {
+          content.push('');
+          content.push('**📋 工具参数**:');
+          
+          if (jsonData.tool_input.file_path) {
+            content.push(`- 📄 文件: \`${jsonData.tool_input.file_path}\``);
+          }
+          
+          if (jsonData.tool_input.command) {
+            content.push(`- 💻 命令: \`${jsonData.tool_input.command.substring(0, 100)}${jsonData.tool_input.command.length > 100 ? '...' : ''}\``);
+          }
+          
+          if (jsonData.tool_input.pattern) {
+            content.push(`- 🔍 搜索: \`${jsonData.tool_input.pattern}\``);
+          }
+          
+          if (jsonData.tool_input.old_string && jsonData.tool_input.new_string) {
+            content.push(`- 🔄 替换: \`${jsonData.tool_input.old_string.substring(0, 50)}...\` → \`${jsonData.tool_input.new_string.substring(0, 50)}...\``);
+          }
+        }
+        
+        // 添加执行结果
+        if (jsonData.tool_response) {
+          content.push('');
+          content.push('**📊 执行结果**:');
+          
+          if (jsonData.tool_response.stdout && jsonData.tool_response.stdout.trim()) {
+            const output = jsonData.tool_response.stdout.substring(0, 200);
+            content.push(`- 📤 输出: \`${output}${jsonData.tool_response.stdout.length > 200 ? '...' : ''}\``);
+          }
+          
+          if (jsonData.tool_response.stderr && jsonData.tool_response.stderr.trim()) {
+            content.push(`- ❌ 错误: \`${jsonData.tool_response.stderr.substring(0, 100)}\``);
+          }
+          
+          const status = jsonData.tool_response.interrupted ? '🛑 中断' : 
+                        jsonData.tool_response.stderr ? '⚠️ 警告' : '✅ 成功';
+          content.push(`- 🏁 状态: ${status}`);
+        }
+      } else if (eventType === 'UserPrompt') {
+        content.push('## 💬 用户消息');
+        content.push('');
+        content.push(`> ${body}`);
+      } else if (eventType === 'Error') {
+        content.push('## ❌ 错误信息');
+        content.push('');
+        content.push(`> 🚨 ${body}`);
+      } else if (eventType === 'Notification') {
+        content.push('## 🔔 系统通知');
+        content.push('');
+        content.push(`> 📢 ${body}`);
+      } else {
+        content.push('## 📋 详细信息');
+        content.push('');
+        content.push(`> ${body}`);
+      }
+    }
+    
+    // 添加原始数据（仅在有额外信息时）
+    if (jsonData && Object.keys(jsonData).length > 0 && (jsonData.cwd || jsonData.hook_event_name)) {
+      content.push('');
+      content.push('---');
+      content.push('');
+      content.push('**🔍 技术详情**:');
+      
+      if (jsonData.cwd) {
+        content.push(`- 📁 工作目录: \`${jsonData.cwd}\``);
+      }
+      
+      if (jsonData.hook_event_name) {
+        content.push(`- 🎯 Hook事件: \`${jsonData.hook_event_name}\``);
+      }
+      
+      if (jsonData.tool_name) {
+        content.push(`- 🛠️ 工具: \`${jsonData.tool_name}\``);
+      }
+    }
+
+    const markdownText = content.join('\n');
 
     // 钉钉API请求体
     const payload = {
       msgtype: 'markdown',
       markdown: {
-        title: title,
-        text: content
+        title: `${eventType} - ${projectName}`,
+        text: markdownText
       }
     };
 
@@ -164,35 +271,49 @@ function sendDingTalkNotification(config, title, subtitle, body) {
       webhookUrl += `&timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`;
     }
 
-    // 构建curl命令，使用双引号和转义
-    const jsonStr = JSON.stringify(payload).replace(/"/g, '\\"');
-    const curlCmd = `curl -X POST "${webhookUrl}" ` +
-      `-H "Content-Type: application/json" ` +
-      `-d "${jsonStr}"`;
+    // 构建curl命令，写入临时文件避免转义问题
+    const tempFile = path.join(require('os').tmpdir(), `dingtalk_payload_${Date.now()}.json`);
+    try {
+      fs.writeFileSync(tempFile, JSON.stringify(payload, null, 2), 'utf8');
+      const curlCmd = `curl -X POST "${webhookUrl}" ` +
+        `-H "Content-Type: application/json" ` +
+        `-d @"${tempFile}"`;
 
-    log(`Sending DingTalk notification: ${title}`);
-    
-    exec(curlCmd, (error, stdout, stderr) => {
-      if (error) {
-        log(`DingTalk notification failed: ${error.message}`);
-        reject(error);
-        return;
-      }
+      log(`Sending DingTalk notification: ${title}`);
       
-      try {
-        const response = JSON.parse(stdout);
-        if (response.errcode === 0) {
-          log('DingTalk notification sent successfully');
-          resolve();
-        } else {
-          log(`DingTalk API error: ${response.errmsg}`);
-          reject(new Error(response.errmsg));
+      exec(curlCmd, (error, stdout, stderr) => {
+        // 清理临时文件
+        try {
+          fs.unlinkSync(tempFile);
+        } catch (cleanupError) {
+          // 忽略清理错误
         }
-      } catch (parseError) {
-        log(`DingTalk response parse error: ${parseError.message}`);
-        reject(parseError);
-      }
-    });
+        
+        if (error) {
+          log(`DingTalk notification failed: ${error.message}`);
+          reject(error);
+          return;
+        }
+        
+        try {
+          const response = JSON.parse(stdout);
+          if (response.errcode === 0) {
+            log('DingTalk notification sent successfully');
+            resolve();
+          } else {
+            log(`DingTalk API error: ${response.errmsg}`);
+            reject(new Error(response.errmsg));
+          }
+        } catch (parseError) {
+          log(`DingTalk response parse error: ${parseError.message}`);
+          log(`Response stdout: ${stdout}`);
+          reject(parseError);
+        }
+      });
+    } catch (fileError) {
+      log(`DingTalk temp file error: ${fileError.message}`);
+      reject(fileError);
+    }
   });
 }
 
@@ -236,10 +357,10 @@ function sendBarkNotification(config, title, subtitle, body, options = {}) {
 }
 
 // 统一发送通知函数
-async function sendNotification(config, title, subtitle, body, options = {}) {
+async function sendNotification(config, title, subtitle, body, options = {}, jsonData = {}) {
   const results = [];
   
-  // 发送Bark通知
+  // 发送Bark通知（保持简洁格式）
   if (config.BARK_ENABLED === 'true' && config.BARK_KEY && config.BARK_KEY !== 'YOUR_BARK_KEY') {
     try {
       await sendBarkNotification(config, title, subtitle, body, options);
@@ -249,10 +370,10 @@ async function sendNotification(config, title, subtitle, body, options = {}) {
     }
   }
   
-  // 发送钉钉通知
+  // 发送钉钉通知（使用丰富格式）
   if (config.DINGTALK_ENABLED === 'true' && config.DINGTALK_WEBHOOK) {
     try {
-      await sendDingTalkNotification(config, title, subtitle, body);
+      await sendDingTalkNotification(config, title, subtitle, body, jsonData);
       results.push('DingTalk: success');
     } catch (error) {
       results.push(`DingTalk: failed - ${error.message}`);
@@ -389,7 +510,7 @@ async function main() {
   
   // 发送通知
   log(`Sending notification: ${title} / ${subtitle} / ${body}`);
-  await sendNotification(config, title, subtitle, body, options);
+  await sendNotification(config, title, subtitle, body, options, jsonData);
   log('Notification function called');
 }
 
